@@ -1,6 +1,12 @@
 import pygame
 import threading
-from .config import DEFAULT_SPEED, YAW_SPEED_RATE, PYGAME_WAIT_TIME
+
+# Try relative imports first (when run as module), fall back to absolute imports
+try:
+    from .config import DEFAULT_SPEED, YAW_SPEED_RATE, PYGAME_WAIT_TIME
+except ImportError:
+    # Fallback for direct execution
+    from config import DEFAULT_SPEED, YAW_SPEED_RATE, PYGAME_WAIT_TIME
 
 
 def pygame_thread_func(velocity_cmd, stop_event):

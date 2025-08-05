@@ -2,252 +2,241 @@ import cv2
 import numpy as np
 import asyncio
 import airsim
-from VO.Vision import VisualOdometry
-from .config import (
-    CALIBRATION_FILE, ASYNC_SLEEP_INTERVAL,
-    MOTION_DETECTION_THRESHOLD, MIN_FEATURES_FOR_VO, TEMPORAL_SMOOTHING_ALPHA,
-    MAX_POSE_HISTORY, SIFT_FEATURES, SIFT_CONTRAST_THRESHOLD, SIFT_EDGE_THRESHOLD,
-    RATIO_TEST_THRESHOLD, RANSAC_THRESHOLD, RANSAC_CONFIDENCE
-)
+import time
 
+# Simple imports for basic configuration
+try:
+    from .config import CALIBRATION_FILE, ASYNC_SLEEP_INTERVAL, FRAME_SKIP_COUNT
+except ImportError:
+    from config import CALIBRATION_FILE, ASYNC_SLEEP_INTERVAL, FRAME_SKIP_COUNT
 
-def detect_motion(prev_frame, curr_frame, threshold=MOTION_DETECTION_THRESHOLD):
-    """
-    Detect if there's sufficient motion between frames to warrant VO processing.
-    This prevents drift accumulation during stationary periods in simulation.
-    """
-    if prev_frame is None:
-        return True
-    
-    # Calculate frame difference
-    diff = cv2.absdiff(prev_frame, curr_frame)
-    motion_level = np.mean(diff)
-    
-    return motion_level > threshold
+# ===============================================================================
+# --- 1. VISUAL ODOMETRY CLASS 
+# ===============================================================================
+class VisualOdometry():
+    def __init__(self, calib_filepath):
+        self.K, self.P = self._load_calib(calib_filepath)
+        self.orb = cv2.ORB_create(3000)
+        FLANN_INDEX_LSH = 6
+        index_params = dict(algorithm=FLANN_INDEX_LSH, table_number=6, key_size=12, multi_probe_level=1)
+        search_params = dict(checks=50)
+        self.flann = cv2.FlannBasedMatcher(indexParams=index_params, searchParams=search_params)
+        self.current_pose = np.eye(4)
+        self.previous_frame = None
+        self.map_points = []  # Store 3D map points for visualization
+        self.trajectory_3d = []  # Store 3D trajectory
 
+    @staticmethod
+    def _load_calib(filepath):
+        with open(filepath, 'r') as f:
+            params = np.fromstring(f.readline(), dtype=np.float64, sep=' ')
+            P = np.reshape(params, (3, 4))
+            K = P[0:3, 0:3]
+        return K, P
 
-def apply_temporal_smoothing(new_pose, prev_poses, alpha=TEMPORAL_SMOOTHING_ALPHA):
-    """
-    Apply exponential smoothing to pose estimates to reduce noise.
-    
-    Args:
-        new_pose: Current pose estimate (4x4 matrix)
-        prev_poses: List of previous poses
-        alpha: Smoothing factor (0.7 = 70% new, 30% previous)
-    """
-    if not prev_poses:
-        return new_pose
-    
-    # Simple exponential smoothing on position
-    prev_pose = prev_poses[-1]
-    smoothed_pose = new_pose.copy()
-    
-    # Smooth translation components
-    smoothed_pose[:3, 3] = alpha * new_pose[:3, 3] + (1 - alpha) * prev_pose[:3, 3]
-    
-    return smoothed_pose
-
-
-class ImprovedVisualOdometry:
-    """
-    Improved VO class with motion detection and better feature matching for simulation.
-    """
-    
-    def __init__(self, calib_file):
-        # Load original VO
-        self.base_vo = VisualOdometry(calib_file)
-        
-        # Enhanced feature detector for simulation
-        self.detector = cv2.SIFT_create(
-            nfeatures=SIFT_FEATURES,
-            contrastThreshold=SIFT_CONTRAST_THRESHOLD,
-            edgeThreshold=SIFT_EDGE_THRESHOLD,
-            sigma=1.6
-        )
-        
-        # Feature matcher with ratio test
-        self.matcher = cv2.BFMatcher()
-        
-        # Motion detection parameters
-        self.motion_threshold = MOTION_DETECTION_THRESHOLD
-        self.min_features = MIN_FEATURES_FOR_VO
-        
-        # Temporal smoothing
-        self.pose_history = []
-        self.max_history = MAX_POSE_HISTORY
-    
-    def get_enhanced_matches(self, img1, img2):
-        """
-        Enhanced feature matching with SIFT and RANSAC for simulation.
-        """
-        # Detect features
-        kp1, des1 = self.detector.detectAndCompute(img1, None)
-        kp2, des2 = self.detector.detectAndCompute(img2, None)
-        
-        if des1 is None or des2 is None or len(des1) < self.min_features or len(des2) < self.min_features:
-            return None, None, []
-        
-        # Match features with ratio test
-        matches = self.matcher.knnMatch(des1, des2, k=2)
-        
-        # Apply Lowe's ratio test
-        good_matches = []
-        for match_pair in matches:
-            if len(match_pair) == 2:
-                m, n = match_pair
-                if m.distance < RATIO_TEST_THRESHOLD * n.distance:
-                    good_matches.append(m)
-        
-        if len(good_matches) < self.min_features:
-            return None, None, []
-        
-        # Extract matched points
-        pts1 = np.float32([kp1[m.queryIdx].pt for m in good_matches]).reshape(-1, 1, 2)
-        pts2 = np.float32([kp2[m.trainIdx].pt for m in good_matches]).reshape(-1, 1, 2)
-        
-        # Convert to the format expected by original VO
-        q1 = pts1.reshape(-1, 2)
-        q2 = pts2.reshape(-1, 2)
-        
-        # Create keypoints for visualization
-        matched_kp = [kp2[m.trainIdx] for m in good_matches]
-        
-        return q1, q2, matched_kp
-    
-    def get_robust_pose(self, q1, q2):
-        """
-        Get pose estimate with RANSAC for outlier rejection.
-        """
-        if q1 is None or q2 is None or len(q1) < 8:
-            return None
-        
-        # Use the original VO's camera matrix
-        K = self.base_vo.K
-        
-        # Find essential matrix with RANSAC
-        E, mask = cv2.findEssentialMat(
-            q1, q2, K,
-            method=cv2.RANSAC,
-            prob=RANSAC_CONFIDENCE,
-            threshold=RANSAC_THRESHOLD
-        )
-        
-        if E is None:
-            return None
-        
-        # Recover pose
-        _, R, t, mask = cv2.recoverPose(E, q1, q2, K)
-        
-        # Create transformation matrix
-        T = np.eye(4)
+    @staticmethod
+    def _form_transf(R, t):
+        T = np.eye(4, dtype=np.float64)
         T[:3, :3] = R
-        T[:3, 3] = t.flatten()
-        
+        T[:3, 3] = t
         return T
 
+    def get_matches(self, prev_frame, current_frame):
+        keypoints1, descriptors1 = self.orb.detectAndCompute(prev_frame, None)
+        keypoints2, descriptors2 = self.orb.detectAndCompute(current_frame, None)
+        matches = []
+        if descriptors1 is not None and descriptors2 is not None:
+            matches = self.flann.knnMatch(descriptors1, descriptors2, k=2)
+        good_matches = []
+        try:
+            for m, n in matches:
+                if m.distance < 0.75 * n.distance:
+                    good_matches.append(m)
+        except ValueError:
+            pass
+        q1 = np.float32([keypoints1[m.queryIdx].pt for m in good_matches])
+        q2 = np.float32([keypoints2[m.trainIdx].pt for m in good_matches])
+        return q1, q2, keypoints2
+
+    def get_pose(self, q1, q2):
+        if len(q1) < 8:
+            return None
+        Essential, mask = cv2.findEssentialMat(q1, q2, self.K, method=cv2.RANSAC, prob=0.999, threshold=1.0)
+        if Essential is None:
+            return None
+        _, R, t, _ = cv2.recoverPose(Essential, q1, q2, self.K, mask=mask)
+        return self._form_transf(R, np.squeeze(t))
+
+    def triangulate_points(self, pose1, pose2, pts1, pts2):
+        """Simple triangulation to create 3D map points."""
+        if len(pts1) < 4:
+            return np.array([])
+        
+        # Create projection matrices
+        P1 = self.K @ pose1[:3, :]
+        P2 = self.K @ pose2[:3, :]
+        
+        # Triangulate points
+        points_4d = cv2.triangulatePoints(P1, P2, pts1.T, pts2.T)
+        
+        # Convert to 3D (homogeneous to euclidean)
+        points_3d = points_4d[:3] / points_4d[3]
+        
+        # Filter out points that are too far or behind camera
+        valid_mask = (points_4d[3] > 0.1) & (points_3d[2] > 0) & (points_3d[2] < 100)
+        
+        return points_3d[:, valid_mask].T
+
+    def process_frame(self, frame):
+        """Process a frame and return keypoints and updated pose."""
+        if self.previous_frame is None:
+            self.previous_frame = frame
+            self.previous_pose = self.current_pose.copy()
+            return [], self.current_pose
+        
+        # Get matches between previous and current frame
+        q1, q2, keypoints = self.get_matches(self.previous_frame, frame)
+        
+        if len(q1) < 8:
+            # Not enough matches, return empty keypoints
+            self.previous_frame = frame
+            return [], self.current_pose
+        
+        # Get relative transformation
+        transformation = self.get_pose(q1, q2)
+        
+        if transformation is not None:
+            # Store previous pose before updating
+            prev_pose = self.current_pose.copy()
+            
+            # Update current pose
+            self.current_pose = self.current_pose @ np.linalg.inv(transformation)
+            
+            # Add current position to trajectory
+            self.trajectory_3d.append({
+                'position': self.current_pose[:3, 3].copy(),
+                'rotation': self.current_pose[:3, :3].copy(),
+                'timestamp': time.time()
+            })
+            
+            # Keep trajectory manageable
+            if len(self.trajectory_3d) > 1000:
+                self.trajectory_3d.pop(0)
+            
+            # Triangulate new map points
+            new_points = self.triangulate_points(prev_pose, self.current_pose, q1, q2)
+            if len(new_points) > 0:
+                self.map_points.extend(new_points)
+                
+                # Keep map points manageable
+                if len(self.map_points) > 5000:
+                    # Keep the most recent 3000 points
+                    self.map_points = self.map_points[-3000:]
+        
+        # Update previous frame
+        self.previous_frame = frame
+        
+        return keypoints, self.current_pose
+
+# ===============================================================================
+# --- 2. Main Execution Loop
+# ===============================================================================
 
 async def run_video_and_vo_improved(airsim_client, gui_queue, est_path, stop_event):
     """
-    Improved async function for video processing and visual odometry with:
-    - Motion detection to skip stationary periods
-    - Enhanced feature matching for simulation
-    - Temporal smoothing to reduce noise
+    Simplified main async function for video processing and visual odometry.
     """
-    print("VO/VIDEO: Starting improved VO tasks.")
+    print("VO/VIDEO: Starting Simple Visual Odometry.")
     
-    # Initialize improved VO
-    improved_vo = ImprovedVisualOdometry(CALIBRATION_FILE)
-    current_pose = np.eye(4)
-    prev_frame_gray = None
+    # Initialize Visual Odometry
+    vo = VisualOdometry(CALIBRATION_FILE)
     
     # Statistics tracking
     frames_processed = 0
-    frames_skipped_motion = 0
-    frames_skipped_features = 0
+    frames_skipped = 0
+    frame_counter = 0
     
-    while not stop_event.is_set():
-        responses = airsim_client.simGetImages([airsim.ImageRequest("0", airsim.ImageType.Scene, False, False)])
-        if not responses or not responses[0].image_data_uint8:
-            await asyncio.sleep(ASYNC_SLEEP_INTERVAL)
-            continue
-            
-        resp = responses[0]
-        img1d = np.frombuffer(resp.image_data_uint8, dtype=np.uint8)
-        current_frame_color = img1d.reshape(resp.height, resp.width, 3)
-        current_frame_gray = cv2.cvtColor(current_frame_color, cv2.COLOR_BGR2GRAY)
-        annotated_frame = current_frame_color.copy()
-
-        if prev_frame_gray is not None:
-            # 1. Motion Detection - Skip VO if drone is stationary
-            if not detect_motion(prev_frame_gray, current_frame_gray, improved_vo.motion_threshold):
-                frames_skipped_motion += 1
-                # Add text overlay to show motion detection
-                cv2.putText(annotated_frame, "STATIONARY - VO SKIPPED", (10, 30), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-            else:
-                # 2. Enhanced Feature Matching
-                q1, q2, keypoints = improved_vo.get_enhanced_matches(prev_frame_gray, current_frame_gray)
+    try:
+        while not stop_event.is_set():
+            # Frame skipping for performance
+            frame_counter += 1
+            if frame_counter % (FRAME_SKIP_COUNT + 1) != 0:
+                frames_skipped += 1
+                await asyncio.sleep(ASYNC_SLEEP_INTERVAL)
+                continue
                 
-                if q1 is not None and q2 is not None:
-                    # Draw enhanced features
-                    annotated_frame = cv2.drawKeypoints(annotated_frame, keypoints, None, color=(0, 255, 0))
-                    
-                    # 3. Robust Pose Estimation with RANSAC
-                    transf = improved_vo.get_robust_pose(q1, q2)
-                    
-                    if transf is not None:
-                        # 4. Temporal Smoothing
-                        raw_pose = current_pose @ np.linalg.inv(transf)
-                        smoothed_pose = apply_temporal_smoothing(raw_pose, improved_vo.pose_history)
-                        
-                        # Update pose history
-                        improved_vo.pose_history.append(smoothed_pose)
-                        if len(improved_vo.pose_history) > improved_vo.max_history:
-                            improved_vo.pose_history.pop(0)
-                        
-                        current_pose = smoothed_pose
-                        x, y, z = current_pose[:3, 3]
-                        est_path.append((x, z))
-                        
-                        frames_processed += 1
-                        
-                        # Add success indicator
-                        cv2.putText(annotated_frame, f"VO OK - Features: {len(keypoints)}", (10, 30), 
-                                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                    else:
-                        frames_skipped_features += 1
-                        cv2.putText(annotated_frame, "POSE ESTIMATION FAILED", (10, 30), 
-                                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                else:
-                    frames_skipped_features += 1
-                    cv2.putText(annotated_frame, "INSUFFICIENT FEATURES", (10, 30), 
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-        
-        # Add statistics overlay
-        stats_text = f"Processed: {frames_processed} | Skipped(Motion): {frames_skipped_motion} | Skipped(Features): {frames_skipped_features}"
-        cv2.putText(annotated_frame, stats_text, (10, annotated_frame.shape[0] - 20), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-        
-        prev_frame_gray = current_frame_gray
-        
-        # Put the results into the queue for the GUI thread to display
-        try:
-            gui_queue.put_nowait({'frame': annotated_frame, 'path': est_path})
-        except:
-            pass  # Don't block if the GUI is slow
-            
-        await asyncio.sleep(ASYNC_SLEEP_INTERVAL)
-    
-    # Print final statistics
-    total_frames = frames_processed + frames_skipped_motion + frames_skipped_features
-    print(f"\nVO STATISTICS:")
-    print(f"  Total frames: {total_frames}")
-    print(f"  Processed: {frames_processed} ({100*frames_processed/total_frames:.1f}%)")
-    print(f"  Skipped (Motion): {frames_skipped_motion} ({100*frames_skipped_motion/total_frames:.1f}%)")
-    print(f"  Skipped (Features): {frames_skipped_features} ({100*frames_skipped_features/total_frames:.1f}%)")
+            responses = airsim_client.simGetImages([airsim.ImageRequest("0", airsim.ImageType.Scene, False, False)])
+            if not responses or not responses[0].image_data_uint8:
+                await asyncio.sleep(ASYNC_SLEEP_INTERVAL)
+                continue
+                
+            resp = responses[0]
+            img1d = np.frombuffer(resp.image_data_uint8, dtype=np.uint8)
+            current_frame_color = img1d.reshape(resp.height, resp.width, 3)
+            current_frame_gray = cv2.cvtColor(current_frame_color, cv2.COLOR_BGR2GRAY)
+            annotated_frame = current_frame_color.copy()
 
+            # Process the frame with the visual odometry system
+            try:
+                keypoints, current_pose = vo.process_frame(current_frame_gray)
+                    
+            except Exception as e:
+                print(f"VO processing error: {e}")
+                keypoints, current_pose = [], vo.current_pose
+            
+            if keypoints and len(keypoints) > 0:
+                # Draw features and update path
+                annotated_frame = cv2.drawKeypoints(annotated_frame, keypoints, None, color=(0, 255, 0))
+                cv2.putText(annotated_frame, f"VO OK - Features: {len(keypoints)}", (10, 30),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                cv2.putText(annotated_frame, f"Frames: {frames_processed}/{frame_counter}", (10, 60),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                
+                # Store trajectory data
+                x, y, z = current_pose[:3, 3]
+                est_path.append((x, z))  # Store as 2D for compatibility
+                
+                frames_processed += 1
+            else:
+                cv2.putText(annotated_frame, "VO INIT / TRACKING LOST", (10, 30),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                cv2.putText(annotated_frame, f"Frames: {frames_processed}/{frame_counter}", (10, 60),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+
+            # Put results into the queue for the GUI
+            try:
+                # Get map points from VO
+                map_points = np.array(vo.map_points[-500:]) if vo.map_points else np.array([])  # Show last 500 points
+                trajectory_3d = vo.trajectory_3d[-100:] if vo.trajectory_3d else []  # Show last 100 trajectory points
+                
+                gui_data = {
+                    'frame': annotated_frame, 
+                    'path': est_path, 
+                    'map_points': map_points,  # Now we have map points from triangulation
+                    'trajectory_3d': trajectory_3d,  # And 3D trajectory
+                    'current_pose': current_pose,
+                    'is_3d_enabled': True,  # Enable 3D visualization
+                    'gps_enabled': False
+                }
+                
+                gui_queue.put_nowait(gui_data)
+                
+            except:  # Catch any queue exception
+                pass # Don't block if GUI is slow
+
+            await asyncio.sleep(ASYNC_SLEEP_INTERVAL)
+    
+    finally:
+        # Cleanup and statistics
+        print(f"\nVO PERFORMANCE STATISTICS:")
+        print(f"  Total Frames Received: {frame_counter}")
+        print(f"  Frames Processed: {frames_processed}")
+        print(f"  Frames Skipped: {frames_skipped}")
+        print(f"  Processing Rate: {frames_processed/frame_counter*100:.1f}%")
+        print(f"  Map Points Generated: {len(vo.map_points)}")
+        print(f"  Trajectory Points: {len(vo.trajectory_3d)}")
 
 # Keep the original function for backward compatibility
 async def run_video_and_vo(airsim_client, gui_queue, est_path, stop_event):
-    """Original VO function - use run_video_and_vo_improved for better results."""
+    """Original VO function - now points to the simplified implementation."""
     return await run_video_and_vo_improved(airsim_client, gui_queue, est_path, stop_event)

@@ -1,7 +1,13 @@
 import asyncio
 from mavsdk import System
 from mavsdk.offboard import VelocityBodyYawspeed
-from .config import DRONE_CONNECTION, TAKEOFF_WAIT_TIME, CONTROL_LOOP_INTERVAL
+
+# Try relative imports first (when run as module), fall back to absolute imports
+try:
+    from .config import DRONE_CONNECTION, TAKEOFF_WAIT_TIME, CONTROL_LOOP_INTERVAL
+except ImportError:
+    # Fallback for direct execution
+    from config import DRONE_CONNECTION, TAKEOFF_WAIT_TIME, CONTROL_LOOP_INTERVAL
 
 
 async def run_drone_control(velocity_cmd, stop_event):

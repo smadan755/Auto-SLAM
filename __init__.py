@@ -17,9 +17,9 @@ __version__ = "1.0.0"
 __author__ = "Your Name"
 
 # Import main components for easy access
-from .main import main
-from .config import *
-from .utils import save_path_to_csv, load_path_from_csv
+from main import main
+from config import *
+from utils import save_path_to_csv, load_path_from_csv
 
 __all__ = [
     'main',
