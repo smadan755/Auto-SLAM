@@ -41,6 +41,37 @@ class VisualOdometry():
         T[:3, 3] = t
         return T
 
+    def get_stereo_matches(self, left_frame, right_frame):
+        """Get feature matches between left and right stereo cameras."""
+        # Detect features in both cameras
+        keypoints_left, descriptors_left = self.orb.detectAndCompute(left_frame, None)
+        keypoints_right, descriptors_right = self.orb.detectAndCompute(right_frame, None)
+        
+        matches = []
+        if descriptors_left is not None and descriptors_right is not None:
+            # Use BFMatcher for stereo matching (more reliable than FLANN for stereo)
+            bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+            matches = bf.match(descriptors_left, descriptors_right)
+            
+            # Sort matches by distance (best matches first)
+            matches = sorted(matches, key=lambda x: x.distance)
+            
+            # Apply epipolar constraint - features should be on roughly the same horizontal line
+            good_matches = []
+            for match in matches:
+                left_pt = keypoints_left[match.queryIdx].pt
+                right_pt = keypoints_right[match.trainIdx].pt
+                
+                # Check if points are on roughly the same horizontal line (epipolar constraint)
+                y_diff = abs(left_pt[1] - right_pt[1])
+                if y_diff < 2.0:  # Allow 2 pixel vertical difference
+                    good_matches.append(match)
+            
+            # Keep only the best matches
+            good_matches = good_matches[:100]  # Limit to best 100 matches
+        
+        return keypoints_left, keypoints_right, good_matches
+
     def get_matches(self, prev_frame, current_frame):
         keypoints1, descriptors1 = self.orb.detectAndCompute(prev_frame, None)
         keypoints2, descriptors2 = self.orb.detectAndCompute(current_frame, None)
@@ -165,16 +196,41 @@ async def run_video_and_vo_improved(airsim_client, gui_queue, est_path, stop_eve
                 await asyncio.sleep(ASYNC_SLEEP_INTERVAL)
                 continue
                 
-            responses = airsim_client.simGetImages([airsim.ImageRequest("0", airsim.ImageType.Scene, False, False)])
-            if not responses or not responses[0].image_data_uint8:
+            responses = airsim_client.simGetImages([
+                airsim.ImageRequest("0", airsim.ImageType.Scene, False, False),  # Left camera
+                airsim.ImageRequest("1", airsim.ImageType.Scene, False, False)   # Right camera
+            ])
+            
+            # Debug: Print response information
+            print(f"Debug: Received {len(responses)} camera responses")
+            if len(responses) >= 1:
+                print(f"Debug: Camera 0 - Size: {len(responses[0].image_data_uint8) if responses[0].image_data_uint8 else 0}")
+            if len(responses) >= 2:
+                print(f"Debug: Camera 1 - Size: {len(responses[1].image_data_uint8) if responses[1].image_data_uint8 else 0}")
+            
+            if not responses or len(responses) < 2 or not responses[0].image_data_uint8 or not responses[1].image_data_uint8:
+                print("Debug: Missing camera data - skipping frame")
                 await asyncio.sleep(ASYNC_SLEEP_INTERVAL)
                 continue
                 
-            resp = responses[0]
-            img1d = np.frombuffer(resp.image_data_uint8, dtype=np.uint8)
-            current_frame_color = img1d.reshape(resp.height, resp.width, 3)
-            current_frame_gray = cv2.cvtColor(current_frame_color, cv2.COLOR_BGR2GRAY)
-            annotated_frame = current_frame_color.copy()
+            # Process left camera (camera "0")
+            resp_left = responses[0]
+            img1d_left = np.frombuffer(resp_left.image_data_uint8, dtype=np.uint8)
+            left_frame_color = img1d_left.reshape(resp_left.height, resp_left.width, 3)
+            left_frame_gray = cv2.cvtColor(left_frame_color, cv2.COLOR_BGR2GRAY)
+            
+            # Process right camera (camera "1")
+            resp_right = responses[1]
+            img1d_right = np.frombuffer(resp_right.image_data_uint8, dtype=np.uint8)
+            right_frame_color = img1d_right.reshape(resp_right.height, resp_right.width, 3)
+            right_frame_gray = cv2.cvtColor(right_frame_color, cv2.COLOR_BGR2GRAY)
+            
+            # Use left camera for visual odometry processing
+            current_frame_gray = left_frame_gray
+            
+            # Create a combined stereo display
+            stereo_display = np.hstack((left_frame_color, right_frame_color))
+            annotated_frame = stereo_display.copy()
 
             # Process the frame with the visual odometry system
             try:
@@ -185,11 +241,48 @@ async def run_video_and_vo_improved(airsim_client, gui_queue, est_path, stop_eve
                 keypoints, current_pose = [], vo.current_pose
             
             if keypoints and len(keypoints) > 0:
-                # Draw features and update path
-                annotated_frame = cv2.drawKeypoints(annotated_frame, keypoints, None, color=(0, 255, 0))
-                cv2.putText(annotated_frame, f"VO OK - Features: {len(keypoints)}", (10, 30),
+                # Get stereo matches between left and right cameras
+                left_keypoints, right_keypoints, stereo_matches = vo.get_stereo_matches(left_frame_gray, right_frame_gray)
+                
+                # Draw VO features on left camera (green)
+                left_with_features = cv2.drawKeypoints(left_frame_color, keypoints, None, color=(0, 255, 0))
+                
+                # Draw stereo matched features on right camera (cyan)
+                right_with_features = cv2.drawKeypoints(right_frame_color, right_keypoints, None, color=(0, 255, 255))
+                
+                # Draw stereo matching lines between cameras
+                if stereo_matches and len(stereo_matches) > 0:
+                    # Create a combined image for drawing matches
+                    stereo_combined = np.hstack((left_with_features, right_with_features))
+                    
+                    # Draw lines connecting matched features
+                    for match in stereo_matches[:20]:  # Show only first 20 matches for clarity
+                        left_pt = left_keypoints[match.queryIdx].pt
+                        right_pt = right_keypoints[match.trainIdx].pt
+                        
+                        # Adjust right point coordinates for combined image
+                        right_pt_adjusted = (int(right_pt[0] + left_frame_color.shape[1]), int(right_pt[1]))
+                        left_pt_int = (int(left_pt[0]), int(left_pt[1]))
+                        
+                        # Draw line connecting matched features
+                        cv2.line(stereo_combined, left_pt_int, right_pt_adjusted, (255, 0, 255), 1)
+                    
+                    annotated_frame = stereo_combined
+                else:
+                    # No stereo matches, just show features on both cameras
+                    annotated_frame = np.hstack((left_with_features, right_with_features))
+                
+                # Update text overlay
+                stereo_match_count = len(stereo_matches) if stereo_matches else 0
+                cv2.putText(annotated_frame, f"VO:{len(keypoints)} Stereo:{stereo_match_count}", (10, 30),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                cv2.putText(annotated_frame, f"Frames: {frames_processed}/{frame_counter}", (10, 60),
+                cv2.putText(annotated_frame, f"Left (VO+Stereo)", (10, 60),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+                cv2.putText(annotated_frame, f"Right (Stereo Matches)", (left_frame_color.shape[1] + 10, 60),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+                cv2.putText(annotated_frame, f"Pink lines = Stereo matches", (10, 90),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 1)
+                cv2.putText(annotated_frame, f"Frames: {frames_processed}/{frame_counter}", (10, 110),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
                 
                 # Store trajectory data
@@ -198,9 +291,13 @@ async def run_video_and_vo_improved(airsim_client, gui_queue, est_path, stop_eve
                 
                 frames_processed += 1
             else:
-                cv2.putText(annotated_frame, "VO INIT / TRACKING LOST", (10, 30),
+                cv2.putText(annotated_frame, "Stereo VO INIT / TRACKING LOST", (10, 30),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                cv2.putText(annotated_frame, f"Frames: {frames_processed}/{frame_counter}", (10, 60),
+                cv2.putText(annotated_frame, f"Left Camera", (10, 60),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                cv2.putText(annotated_frame, f"Right Camera", (left_frame_color.shape[1] + 10, 60),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                cv2.putText(annotated_frame, f"Frames: {frames_processed}/{frame_counter}", (10, 90),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
             # Put results into the queue for the GUI

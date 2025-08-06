@@ -1,0 +1,74 @@
+{
+    "SettingsVersion": 1.2,
+    "SimMode": "Multirotor",
+
+    "OriginGeopoint": {
+        "Latitude": 47.641468,
+        "Longitude": -122.140165,
+        "Altitude": 122
+    },
+
+    "Vehicles": {
+        "PX4": {
+            "VehicleType": "PX4Multirotor",
+            "UseSerial": false,
+            "LockStep": true,
+            "UseTcp": true,
+            "TcpPort": 4560,
+            "ControlPortLocal": 14550,
+            "ControlPortRemote": 14556,
+            "LocalHostIp": "172.30.144.1",
+            "MavlinkSysId": 133,
+            "MavlinkPort": 14559,
+            "QgcHostIp": "127.0.0.1",
+            "QgcPort": 14550,
+            "Cameras": {
+                "0": {
+                    "CaptureSettings": [
+                        {
+                            "ImageType": 0,
+                            "Width": 640,
+                            "Height": 480
+                        }
+                    ],
+                    "X": 0.20, "Y": -0.06, "Z": 0.0,
+                    "Pitch": 0.0, "Roll": 0.0, "Yaw": 0.0
+                },
+                "1": {
+                    "CaptureSettings": [
+                        {
+                            "ImageType": 0,
+                            "Width": 640,
+                            "Height": 480
+                        }
+                    ],
+                    "X": 0.20, "Y": 0.06, "Z": 0.0,
+                    "Pitch": 0.0, "Roll": 0.0, "Yaw": 0.0
+                }
+            },
+            "Sensors": {
+                "Barometer": {
+                    "SensorType": 1,
+                    "Enabled": true
+                },
+                "Imu": {
+                    "SensorType": 2,
+                    "Enabled": true
+                },
+                "Gps": {
+                    "SensorType": 3,
+                    "Enabled": true,
+                    "UpdateFrequency": 50
+                },
+                "Magnetometer": {
+                    "SensorType": 4,
+                    "Enabled": true
+                },
+                "Distance": {
+                    "SensorType": 5,
+                    "Enabled": true
+                }
+            }
+        }
+    }
+}

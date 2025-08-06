@@ -1,0 +1,122 @@
+{
+    "SettingsVersion": 1.2,
+    "SimMode": "Multirotor",
+
+    "CameraDefaults": {
+        "CaptureSettings": [
+            {
+                "ImageType": 0,
+                "Width": 1280,
+                "Height": 720
+            }
+        ]
+    },
+
+    "OriginGeopoint": {
+        "Latitude": 47.641468,
+        "Longitude": -122.140165,
+        "Altitude": 122
+    },
+
+    "Vehicles": {
+        "PX4": {
+            "VehicleType": "PX4Multirotor",
+            "UseSerial": false,
+            "LockStep": true,
+            "UseTcp": true,
+            "TcpPort": 4560,
+            "ControlPortLocal": 14550,
+            "ControlPortRemote": 14556,
+            "LocalHostIp": "172.30.144.1",
+            "MavlinkSysId": 133,
+            "MavlinkPort": 14559,
+            "QgcHostIp": "127.0.0.1",
+            "QgcPort": 14550,
+            "Cameras": {
+                "front_center": {
+                    "CaptureSettings": [
+                        {
+                            "ImageType": 0,
+                            "Width": 1280,
+                            "Height": 720
+                        },
+                        {
+                            "ImageType": 1,
+                            "Width": 1280,
+                            "Height": 720
+                        }
+                    ],
+                    "X": 0.30, "Y": 0.0, "Z": 0.0,
+                    "Pitch": 0.0, "Roll": 0.0, "Yaw": 0.0
+                },
+                "front_left": {
+                    "CaptureSettings": [
+                        {
+                            "ImageType": 0,
+                            "Width": 1280,
+                            "Height": 720
+                        },
+                        {
+                            "ImageType": 1,
+                            "Width": 1280,
+                            "Height": 720
+                        }
+                    ],
+                    "X": 0.30, "Y": -0.10, "Z": 0.0,
+                    "Pitch": 0.0, "Roll": 0.0, "Yaw": 0.0
+                },
+                "front_right": {
+                    "CaptureSettings": [
+                        {
+                            "ImageType": 0,
+                            "Width": 1280,
+                            "Height": 720
+                        },
+                        {
+                            "ImageType": 1,
+                            "Width": 1280,
+                            "Height": 720
+                        }
+                    ],
+                    "X": 0.30, "Y": 0.10, "Z": 0.0,
+                    "Pitch": 0.0, "Roll": 0.0, "Yaw": 0.0
+                }
+            },
+                }
+            },
+            "Sensors": {
+                "Barometer": {
+                    "SensorType": 1,
+                    "Enabled": true
+                },
+                "Imu": {
+                    "SensorType": 2,
+                    "Enabled": true
+                },
+                "Gps": {
+                    "SensorType": 3,
+                    "Enabled": true,
+                    "EphTimeConstant": 0.9,
+                    "EpvTimeConstant": 0.9,
+                    "EphInitial": 25,
+                    "EpvInitial": 25,
+                    "EphFinal": 0.1,
+                    "EpvFinal": 0.1,
+                    "EphMin3d": 3.0,
+                    "EphMin2d": 4.0,
+                    "UpdateLatency": 0.2,
+                    "UpdateFrequency": 50,
+                    "StartupDelay": 1
+                },
+                "Magnetometer": {
+                    "SensorType": 4,
+                    "Enabled": true
+                },
+                "Distance": {
+                    "SensorType": 5,
+                    "Enabled": true
+                }
+            }
+        }
+    }
+}
